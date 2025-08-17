@@ -1,0 +1,32 @@
+databaseChangeLog:
+  - changeSet:
+      id: 1755460018070-1
+      author: joshuaterk
+      objectQuotingStrategy: QUOTE_ONLY_RESERVED_WORDS
+      changes:
+        - createTable:
+            columns:
+              - column:
+                  constraints:
+                    nullable: false
+                    primaryKey: true
+                    primaryKeyName: pk_calendarpreconditionlinkentity
+                  name: uuid
+                  type: UUID
+              - column:
+                  name: vin
+                  type: VARCHAR(255)
+              - column:
+                  name: calendar_id
+                  type: VARCHAR(255)
+              - column:
+                  name: unix_start_time
+                  type: BIGINT
+              - column:
+                  name: attendee_email
+                  type: VARCHAR(255)
+              - column:
+                  name: precondition_id
+                  type: BIGINT
+            tableName: calendar_pre_condition_link_entity
+
