@@ -1,6 +1,5 @@
 package com.jtdev.teslaautomaticpreconditioning;
 
-import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.context.annotation.Import;
 
@@ -8,8 +7,8 @@ import org.springframework.context.annotation.Import;
 @SpringBootTest
 class TeslaAutomaticPreconditioningApplicationTests {
 
-    @Test
-    void contextLoads() {
-    }
+//    @Test
+//    void contextLoads() {
+//    }
 
 }

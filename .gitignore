@@ -31,3 +31,26 @@ build/
 
 ### VS Code ###
 .vscode/
+
+### Credentials and Secrets ###
+# Google credentials - NEVER commit these!
+src/main/resources/google/*.json
+**/credentials/
+**/secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+
+### Environment files ###
+.env
+.env.*
+.env.local
+.env.*.local
+
+### Backup files ###
+*Backup.java
+**/*Backup.java
+
+### System files ###
+.DS_Store

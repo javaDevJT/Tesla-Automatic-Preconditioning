@@ -1,0 +1,56 @@
+google:
+  calendar:
+    credentials-path: file:/path/to/your/service-account.json
+    application-name: Tesla Automatic Preconditioning
+    name: REPLACE_WITH_YOURS@group.calendar.google.com
+  maps:
+    routes:
+      field-mask: routes.distanceMeters,routes.duration,routes.routeLabels,routes.routeToken
+  weather:
+    api-key: YOUR_GOOGLE_WEATHER_API_KEY
+    base-url: https://weather.googleapis.com/v1
+    units: IMPERIAL
+teslemetry:
+  oauth:
+    token: YOUR_TESLEMETRY_TOKEN
+spring:
+  mail:
+    host: smtp.gmail.com
+    port: 587
+    username: YOUR_EMAIL_USERNAME
+    password: YOUR_EMAIL_PASSWORD
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+  datasource:
+    url: jdbc:h2:mem:testdb
+    username: sa
+    password: password
+  liquibase:
+    enabled: true
+    change-log: file:/resources/db/changelog/17-01-changelog.yaml
+tesla:
+  vin:
+    csv: ASSIGNEE_EMAIL_ONE:TESLA_VIN_ONE,ASSIGNEE_EMAIL_ONE:TESLA_VIN_TWO
+  home:
+    lat: YOUR_HOME_LAT
+    lon: YOUR_HOME_LON
+  preconditioning:
+    buffer:
+      minutes: 10
+    scheduling:
+      out-of-metro-threshold-miles: 100
+      rescheduling:
+        enabled: true
+        movement-threshold-miles: 25
+        time-savings-threshold-minutes: 30
+        minimum-time-remaining-hours: 2
+
+app:
+  api:
+    secret-key: TO_SECURE_ENDPOINTS
+  notifications:
+    sms:
+      # SMS gateway email addresses (e.g., phonenumber@carrier-sms-gateway.com)
+      # Common gateways: @msg.fi.google.com (Google Fi), @txt.att.net (AT&T), @tmomail.net (T-Mobile)
+      recipients: YOUR_PHONE_1@msg.fi.google.com,YOUR_PHONE_2@msg.fi.google.com

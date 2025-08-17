@@ -9,8 +9,8 @@ import com.google.maps.routing.v2.RoutesSettings;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.core.io.Resource;
 
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Map;
@@ -26,8 +26,8 @@ public class GoogleMapsConfig {
     @Value("${google.maps.routes.auth:adc}")
     private String authMode;
 
-    @Value("${google.creds.absolute.path:/Users/joshuaterk/IdeaProjects/Tesla-Automatic-Preconditioning/src/main/resources/google/service-account.json}")
-    private String credsPath;
+    @Value("${google.calendar.credentials-path:}")
+    private Resource credentialsPath;
 
     /**
      * Only required when auth=api-key
@@ -83,7 +83,7 @@ public class GoogleMapsConfig {
         if ("api-key".equalsIgnoreCase(authMode)) {
             builder.setCredentialsProvider(NoCredentialsProvider.create());
         } else {
-            GoogleCredentials adc = GoogleCredentials.fromStream(new FileInputStream(credsPath));
+            GoogleCredentials adc = GoogleCredentials.fromStream(credentialsPath.getInputStream());
             builder.setCredentialsProvider(FixedCredentialsProvider.create(adc));
         }
 

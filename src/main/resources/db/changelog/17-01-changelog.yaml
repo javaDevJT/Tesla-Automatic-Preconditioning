@@ -28,5 +28,61 @@ databaseChangeLog:
               - column:
                   name: precondition_id
                   type: BIGINT
+              - column:
+                  name: deleted
+                  type: boolean
             tableName: calendar_pre_condition_link_entity
-
+  - changeSet:
+      id: 1755460018070-2
+      author: joshuaterk
+      objectQuotingStrategy: QUOTE_ONLY_RESERVED_WORDS
+      changes:
+        - addColumn:
+            tableName: calendar_pre_condition_link_entity
+            columns:
+              - column:
+                  name: status
+                  type: VARCHAR(50)
+                  defaultValue: 'PENDING'
+                  constraints:
+                    nullable: false
+  - changeSet:
+      id: add-preconditioning-metadata-columns
+      author: amp-enhancement
+      objectQuotingStrategy: QUOTE_ONLY_RESERVED_WORDS
+      changes:
+        - addColumn:
+            tableName: calendar_pre_condition_link_entity
+            columns:
+              - column:
+                  name: stored_precondition_time
+                  type: INTEGER
+                  remarks: "Minutes from midnight for the preconditioning schedule"
+              - column:
+                  name: stored_day_of_week
+                  type: VARCHAR(20)
+                  remarks: "Day of week for the preconditioning schedule"
+              - column:
+                  name: stored_latitude
+                  type: DOUBLE
+                  remarks: "Latitude where preconditioning was set"
+              - column:
+                  name: stored_longitude
+                  type: DOUBLE
+                  remarks: "Longitude where preconditioning was set"
+              - column:
+                  name: last_verified_timestamp
+                  type: BIGINT
+                  remarks: "Timestamp when entry was last verified on vehicle"
+  - changeSet:
+      id: add-event-summary-column
+      author: joshuaterk
+      objectQuotingStrategy: QUOTE_ONLY_RESERVED_WORDS
+      changes:
+        - addColumn:
+            tableName: calendar_pre_condition_link_entity
+            columns:
+              - column:
+                  name: event_summary
+                  type: VARCHAR(500)
+                  remarks: "Name/title of the calendar event"

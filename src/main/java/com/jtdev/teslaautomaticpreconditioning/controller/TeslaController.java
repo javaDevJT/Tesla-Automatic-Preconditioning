@@ -1,23 +1,37 @@
 package com.jtdev.teslaautomaticpreconditioning.controller;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.jtdev.teslaautomaticpreconditioning.fleetapi.VehicleData;
-import com.jtdev.teslaautomaticpreconditioning.service.FleetApiService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.GetMapping;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RestController;
 
+import com.jtdev.teslaautomaticpreconditioning.entity.Telemetry;
+import com.jtdev.teslaautomaticpreconditioning.service.PreConditioningSchedulerService;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.*;
+
+@Slf4j
 @RestController
 @RequestMapping("/tesla")
 public class TeslaController {
 
     @Autowired
-    private FleetApiService fleetApiService;
+    private PreConditioningSchedulerService preConditioningSchedulerService;
 
-    @GetMapping("/vehicle-data")
-    public VehicleData getVehicleData(@RequestParam String vin) throws JsonProcessingException {
-        return fleetApiService.getVehicleData(vin);
+    @PostMapping("/telemetry/{vin}")
+    @ResponseStatus(HttpStatus.OK)
+    public void saveNewTelemetry(@PathVariable String vin, @RequestBody Telemetry telemetry) {
+        log.debug("Saving new telemetry for vin: {}", vin);
+        log.debug("Telemetry: {}", telemetry);
+        long currentTime = System.currentTimeMillis();
+        if (telemetry.getData() != null && telemetry.getData().getLocation() != null) {
+            preConditioningSchedulerService.getVinLocationMap().put(vin, telemetry.getData().getLocation());
+            // Record telemetry timestamp and location for travel detection
+            preConditioningSchedulerService.recordTelemetryTimestamp(vin, currentTime, telemetry.getData().getLocation());
+        }
+        if (telemetry.getData() != null && telemetry.getData().getInsideTemp() != null) {
+            preConditioningSchedulerService.getVinInsideTempMap().put(vin, telemetry.getData().getInsideTemp());
+        }
+        if (telemetry.getData() != null && telemetry.getData().getOutsideTemp() != null) {
+            preConditioningSchedulerService.getVinOutsideTempMap().put(vin, telemetry.getData().getOutsideTemp());
+        }
     }
 }

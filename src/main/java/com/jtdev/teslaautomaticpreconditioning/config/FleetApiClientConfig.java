@@ -8,11 +8,11 @@ import org.springframework.context.annotation.Configuration;
 @Configuration
 public class FleetApiClientConfig {
 
-    @Value("${tessie.oauth.token}")
+    @Value("${teslemetry.oauth.token}")
     private String accessToken;
 
     @Bean
     public FleetApi fleetApi() {
-        return FleetApi.newBuilder().accessToken(accessToken).baseUrl("https://api.tessie.com/api/1").build();
+        return FleetApi.newBuilder().accessToken(accessToken).baseUrl("https://api.teslemetry.com/api/1").logRequests(true).build();
     }
 }

@@ -28,4 +28,28 @@ public class CalendarPreConditionLinkEntity {
     private String attendeeEmail;
     @Column
     private long preconditionId;
+    @Column
+    private boolean deleted;
+    @Column
+    @Enumerated(EnumType.STRING)
+    private PreconditioningStatus status = PreconditioningStatus.PENDING;
+    
+    // Preconditioning schedule parameters to avoid unnecessary vehicle queries
+    @Column
+    private Integer storedPreconditionTime; // Minutes from midnight
+    
+    @Column
+    private String storedDayOfWeek; // Day of week string
+    
+    @Column
+    private Double storedLatitude; // Location latitude
+    
+    @Column
+    private Double storedLongitude; // Location longitude
+    
+    @Column
+    private Long lastVerifiedTimestamp; // When we last confirmed it was on vehicle
+    
+    @Column
+    private String eventSummary; // Name/title of the calendar event
 }

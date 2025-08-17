@@ -246,21 +246,57 @@ public class FleetApi {
         while (attempt <= maxRetries) {
             attempt++;
             if (logRequests) System.out.println("➡ " + request.method() + " " + request.uri());
-            HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
-            int code = resp.statusCode();
-            if (logRequests)
-                System.out.println("⬅ [" + code + "] " + (resp.body() != null ? Math.min(resp.body().length(), 200) : 0) + " bytes");
-            if (code < 500 && code != 429) return resp.body();
-            // retry on 429/5xx
-            long sleepMs = computeRetryDelay(resp.headers().firstValue("Retry-After").orElse(null),
-                    resp.headers().firstValue("RateLimit-Reset").orElse(null),
-                    attempt);
-            if (attempt > maxRetries) return resp.body();
-            Thread.sleep(sleepMs);
+            
+            try {
+                HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
+                int code = resp.statusCode();
+                if (logRequests)
+                    System.out.println("⬅ [" + code + "] " + (resp.body() != null ? Math.min(resp.body().length(), 200) : 0) + " bytes");
+                if (code < 500 && code != 429) return resp.body();
+                
+                // retry on 429/5xx
+                long sleepMs = computeRetryDelay(resp.headers().firstValue("Retry-After").orElse(null),
+                        resp.headers().firstValue("RateLimit-Reset").orElse(null),
+                        attempt);
+                if (attempt > maxRetries) return resp.body();
+                Thread.sleep(sleepMs);
+                
+            } catch (java.net.http.HttpTimeoutException | java.net.SocketTimeoutException e) {
+                lastIo = new IOException("Request timeout on attempt " + attempt, e);
+                if (logRequests) System.out.println("⚠️ Timeout on attempt " + attempt + ", retrying...");
+                
+                if (attempt > maxRetries) break; // Exit retry loop if max attempts reached
+                
+                // Use default retry delay for timeout
+                long sleepMs = computeDefaultRetryDelay(attempt);
+                Thread.sleep(sleepMs);
+                
+            } catch (IOException e) {
+                lastIo = e;
+                if (logRequests) System.out.println("⚠️ IOException on attempt " + attempt + ": " + e.getMessage());
+                
+                if (attempt > maxRetries) break;
+                
+                long sleepMs = computeDefaultRetryDelay(attempt);
+                Thread.sleep(sleepMs);
+                
+            } catch (InterruptedException e) {
+                lastInt = e;
+                Thread.currentThread().interrupt(); // Restore interrupt status
+                break; // Don't retry on interruption
+            }
         }
         if (lastIo != null) throw lastIo;
         if (lastInt != null) throw lastInt;
         throw new IOException("Request failed after retries");
+    }
+    
+    private long computeDefaultRetryDelay(int attempt) {
+        // Exponential backoff: 2^attempt seconds, capped at 60 seconds
+        long baseDelayMs = Math.min(1000L * (1L << attempt), 60000L);
+        // Add jitter to avoid thundering herd
+        long jitterMs = (long) (Math.random() * 1000);
+        return baseDelayMs + jitterMs;
     }
 
     private String get(String path, Map<String, String> query) {
@@ -554,6 +590,10 @@ public class FleetApi {
     //                              VEHICLE ENDPOINTS
     // ==================================================================================
 
+
+    public void forceRefresh(String vin) {
+        get("/api/refresh/" + vin, null);
+    }
     /**
      * GET /api/1/dx/vehicles/subscriptions/eligibility?vin={vin}
      */
@@ -719,7 +759,7 @@ public class FleetApi {
      * GET /api/1/vehicles/{vehicle_tag}/vehicle_data
      */
     public String vehicleData(String vehicleTag, Map<String, String> query) {
-        return get("/api/1/vehicles/" + vehicleTag + "/vehicle_data", query);
+        return get("/vehicles/" + vehicleTag + "/vehicle_data", query);
     }
 
     /**
@@ -740,7 +780,7 @@ public class FleetApi {
      * POST /api/1/vehicles/{vehicle_tag}/wake_up
      */
     public String vehiclesWakeUp(String vehicleTag) {
-        return post("/api/1/vehicles/" + vehicleTag + "/wake_up", null, "{}");
+        return post("/vehicles/" + vehicleTag + "/wake_up", null, "{}");
     }
 
     /**
