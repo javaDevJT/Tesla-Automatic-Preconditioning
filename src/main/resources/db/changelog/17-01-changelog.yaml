@@ -86,3 +86,15 @@ databaseChangeLog:
                   name: event_summary
                   type: VARCHAR(500)
                   remarks: "Name/title of the calendar event"
+  - changeSet:
+      id: add-was-vehicle-away-column
+      author: joshuaterk
+      objectQuotingStrategy: QUOTE_ONLY_RESERVED_WORDS
+      changes:
+        - addColumn:
+            tableName: calendar_pre_condition_link_entity
+            columns:
+              - column:
+                  name: was_vehicle_away
+                  type: BOOLEAN
+                  remarks: "For return home: tracks if vehicle was ever away from home during this event"

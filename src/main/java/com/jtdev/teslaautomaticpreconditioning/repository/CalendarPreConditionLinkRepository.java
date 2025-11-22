@@ -11,7 +11,7 @@ import java.util.UUID;
 
 @Repository
 public interface CalendarPreConditionLinkRepository extends JpaRepository<CalendarPreConditionLinkEntity, UUID> {
-    Optional<CalendarPreConditionLinkEntity> findByCalendarId(String calendarId);
+    Optional<CalendarPreConditionLinkEntity> findFirstByCalendarId(String calendarId);
     Optional<CalendarPreConditionLinkEntity> findByPreconditionId(long preconditionId);
     boolean existsById(UUID uuid);
     List<CalendarPreConditionLinkEntity> findAllByDeleted(boolean isDeleted);

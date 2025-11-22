@@ -103,6 +103,10 @@ public class PreConditioningSchedulerService {
     private Map<String, Double> vinOutsideTempMap = new HashMap<>();
     @Getter
     private Map<String, Double> vinInsideTempMap = new HashMap<>();
+    
+    // Vehicle name cache - maps VIN to friendly vehicle name (e.g., "Xena Warrior Princess")
+    @Getter
+    private final Map<String, String> vinVehicleNameMap = new ConcurrentHashMap<>();
 
     private Map<String, Long> vinDefrostMap = new HashMap<>();
 
@@ -115,6 +119,12 @@ public class PreConditioningSchedulerService {
     // Track previous travel state to detect transitions
     @Getter
     private final Map<String, Boolean> vinPreviousTravelState = new ConcurrentHashMap<>();
+
+    // Track when we last received LOCATION data for each VIN (to detect stale location = parked)
+    private final Map<String, Long> vinLastLocationUpdateTime = new ConcurrentHashMap<>();
+    
+    // Track when we last received ANY telemetry for each VIN
+    private final Map<String, Long> vinLastTelemetryTime = new ConcurrentHashMap<>();
 
     /**
      * Simple data class to store location with timestamp
@@ -154,6 +164,127 @@ public class PreConditioningSchedulerService {
     }
 
     /**
+     * Get the display name for a vehicle - returns the friendly vehicle name if available, otherwise the VIN
+     * @param vin Vehicle identification number
+     * @return Vehicle name (e.g., "Xena Warrior Princess") or VIN as fallback
+     */
+    public String getVehicleDisplayName(String vin) {
+        if (vin == null) {
+            return "Unknown Vehicle";
+        }
+        String vehicleName = vinVehicleNameMap.get(vin);
+        return (vehicleName != null && !vehicleName.isBlank()) ? vehicleName : vin;
+    }
+
+    /**
+     * Build SMS notification message for preconditioning confirmation
+     * For departures: "Preconditioning on [vehicle] for '[event]'. Depart at [time] to arrive 10 min early ([X] min travel time)"
+     * For return home: "Return home preconditioning on [vehicle] for '[event]'. Estimated [X] min travel time home"
+     * @param entity The preconditioning entity
+     * @return Formatted SMS message
+     */
+    private String buildPreconditioningConfirmationSms(CalendarPreConditionLinkEntity entity) {
+        String vehicleName = getVehicleDisplayName(entity.getVin());
+        String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
+        boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
+        
+        try {
+            // Get the event to calculate travel time
+            Event event = googleCalendarService.getCalendar().getItems().stream()
+                    .filter(e -> e.getId().equals(entity.getCalendarId().replace("_RETURN_HOME", "")))
+                    .findFirst()
+                    .orElse(null);
+            
+            if (event == null) {
+                // Fallback if event not found
+                return "Preconditioning on " + vehicleName + " scheduled for event '" + eventName + "'";
+            }
+            
+            // Calculate travel time
+            int travelTimeMinutes = 15; // Default
+            try {
+                double startLat, startLon;
+                String destination;
+                
+                if (isReturnHome) {
+                    // For return home: from current location to home
+                    double[] currentLoc = getCurrentVehicleLocation(entity.getVin());
+                    startLat = currentLoc[0];
+                    startLon = currentLoc[1];
+                    destination = homeLatitude + "," + homeLongitude;
+                } else {
+                    // For departure: from home/current location to event
+                    startLat = entity.getStoredLatitude() != null ? entity.getStoredLatitude() : homeLatitude;
+                    startLon = entity.getStoredLongitude() != null ? entity.getStoredLongitude() : homeLongitude;
+                    destination = event.getLocation();
+                }
+                
+                if (destination != null && !destination.isBlank()) {
+                    travelTimeMinutes = Math.toIntExact(routesCalculationService
+                            .calculateRouteToDestination(startLat, startLon, destination)
+                            .getRoutesList().stream()
+                            .max(Comparator.comparing(r -> r.getDuration().getSeconds()))
+                            .map(r -> r.getDuration().getSeconds() / 60)
+                            .orElse(15L));
+                }
+            } catch (Exception e) {
+                log.debug("Could not calculate travel time for SMS, using default: {}", e.getMessage());
+            }
+            
+            if (isReturnHome) {
+                return "Return home preconditioning on " + vehicleName + " for '" + eventName + 
+                        "'. Estimated " + travelTimeMinutes + " min travel time home";
+            } else {
+                // Calculate departure time
+                ZonedDateTime eventTime = Instant.ofEpochMilli(event.getStart().getDateTime().getValue())
+                        .atZone(ZoneId.of("America/New_York"));
+                ZonedDateTime departureTime = eventTime.minusMinutes(travelTimeMinutes + preconditioningBufferMinutes);
+                String departureTimeStr = String.format("%d:%02d %s", 
+                        departureTime.getHour() > 12 ? departureTime.getHour() - 12 : (departureTime.getHour() == 0 ? 12 : departureTime.getHour()),
+                        departureTime.getMinute(),
+                        departureTime.getHour() >= 12 ? "PM" : "AM");
+                
+                return "Preconditioning on " + vehicleName + " for '" + eventName + 
+                        "'. Depart at " + departureTimeStr + " to arrive " + preconditioningBufferMinutes + 
+                        " min early (" + travelTimeMinutes + " min travel time)";
+            }
+        } catch (Exception e) {
+            log.debug("Error building preconditioning SMS, using fallback: {}", e.getMessage());
+            return "Preconditioning on " + vehicleName + " scheduled for event '" + eventName + "'";
+        }
+    }
+
+    /**
+     * Store a vehicle name for a VIN (extracted from telemetry or API response)
+     * @param vin Vehicle identification number
+     * @param vehicleName The friendly vehicle name
+     */
+    public void setVehicleName(String vin, String vehicleName) {
+        if (vin != null && vehicleName != null && !vehicleName.isBlank()) {
+            String previousName = vinVehicleNameMap.put(vin, vehicleName);
+            if (previousName == null) {
+                log.info("Learned vehicle name for VIN {}: '{}'", vin, vehicleName);
+            } else if (!previousName.equals(vehicleName)) {
+                log.info("Updated vehicle name for VIN {} from '{}' to '{}'", vin, previousName, vehicleName);
+            }
+        }
+    }
+
+    /**
+     * Extract and store vehicle name from VehicleData API response
+     * @param vin Vehicle identification number
+     * @param vehicleData The VehicleData object from API response
+     */
+    private void extractVehicleNameFromApiResponse(String vin, VehicleData vehicleData) {
+        if (vehicleData != null && vehicleData.getVehicle_state() != null) {
+            String vehicleName = vehicleData.getVehicle_state().getVehicle_name();
+            if (vehicleName != null && !vehicleName.isBlank()) {
+                setVehicleName(vin, vehicleName);
+            }
+        }
+    }
+
+    /**
      * Calculate desired preconditioning time for an event (helper method)
      */
     private int calculateDesiredPreconditionTime(Event event, String vin) {
@@ -179,17 +310,22 @@ public class PreConditioningSchedulerService {
     }
 
     /**
-     * Record a telemetry timestamp and location for travel detection and check for travel state transitions
+     * Record a telemetry timestamp and location for travel detection and check for travel state transitions.
+     * This method is called when telemetry WITH location data arrives.
      */
     public void recordTelemetryTimestamp(String vin, long timestamp, Telemetry.Location location) {
+        // Record that we received ANY telemetry
+        vinLastTelemetryTime.put(vin, timestamp);
+        
         vinTelemetryTimestamps.computeIfAbsent(vin, k -> new ArrayList<>()).add(timestamp);
         // Keep only recent timestamps (last 10 minutes)
         List<Long> timestamps = vinTelemetryTimestamps.get(vin);
         long tenMinutesAgo = timestamp - (10 * 60 * 1000L);
         timestamps.removeIf(t -> t < tenMinutesAgo);
 
-        // Also record location if provided
+        // Record location data and update last location time
         if (location != null) {
+            vinLastLocationUpdateTime.put(vin, timestamp);
             vinTelemetryLocations.computeIfAbsent(vin, k -> new ArrayList<>())
                     .add(new LocationWithTimestamp(location.getLatitude(), location.getLongitude(), timestamp));
             // Keep only recent locations (last 10 minutes)
@@ -198,12 +334,32 @@ public class PreConditioningSchedulerService {
         }
 
         // Check for travel state transition
+        checkAndUpdateTravelState(vin);
+    }
+    
+    /**
+     * Record that telemetry arrived WITHOUT location data.
+     * This is critical for detecting when a vehicle has parked - location data stops but other telemetry continues.
+     * If we're receiving telemetry but location data is stale (>5 min), the vehicle has likely parked.
+     */
+    public void recordTelemetryWithoutLocation(String vin, long timestamp) {
+        // Record that we received telemetry (even without location)
+        vinLastTelemetryTime.put(vin, timestamp);
+        
+        // Check for travel state transition - location staleness will be detected in isVehicleTraveling
+        checkAndUpdateTravelState(vin);
+    }
+    
+    /**
+     * Check and update travel state, triggering actions on traveling→stationary transitions
+     */
+    private void checkAndUpdateTravelState(String vin) {
         boolean currentlyTraveling = isVehicleTraveling(vin);
         Boolean previouslyTraveling = vinPreviousTravelState.get(vin);
 
         // Detect transition from traveling to stationary
         if (previouslyTraveling != null && previouslyTraveling && !currentlyTraveling) {
-            log.info("Vehicle {} transitioned from traveling to stationary - checking for pending precondition updates", vin);
+            log.info("{} transitioned from traveling to stationary - checking for pending precondition updates", getVehicleDisplayName(vin));
             checkPendingPreconditionsForLocationUpdate(vin);
         }
 
@@ -224,12 +380,26 @@ public class PreConditioningSchedulerService {
                     log.debug("Checking pending preconditions for VIN {} after travel-to-stationary transition", vin);
 
                     // Find all active preconditions for this VIN
+                    // For departures: event hasn't started yet (unixStartTime > now)
+                    // For return home: event HAS started (unixStartTime <= now) but not more than 12 hours ago
+                    long now = System.currentTimeMillis();
+                    long twelveHoursAgo = now - (12 * 60 * 60 * 1000L);
+                    
                     List<CalendarPreConditionLinkEntity> pendingEntities = calendarPreConditionLinkRepository
                             .findAllByDeleted(false).stream()
                             .filter(entity -> vin.equals(entity.getVin()))
                             .filter(entity -> entity.getStatus() == PreconditioningStatus.ACTIVE ||
                                              entity.getStatus() == PreconditioningStatus.PENDING)
-                            .filter(entity -> entity.getUnixStartTime() > System.currentTimeMillis()) // Future events
+                            .filter(entity -> {
+                                boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
+                                if (isReturnHome) {
+                                    // Return home: process if event has STARTED but not more than 12 hours ago
+                                    return entity.getUnixStartTime() <= now && entity.getUnixStartTime() > twelveHoursAgo;
+                                } else {
+                                    // Departures: process if event hasn't started yet
+                                    return entity.getUnixStartTime() > now;
+                                }
+                            })
                             .toList();
 
                     if (pendingEntities.isEmpty()) {
@@ -242,11 +412,56 @@ public class PreConditioningSchedulerService {
                     double currentLat = currentLocation[0];
                     double currentLon = currentLocation[1];
 
+                    // Calculate distance from home
+                    double distanceFromHome = calculateDistance(currentLat, currentLon, homeLatitude, homeLongitude);
+                    boolean isNearHome = distanceFromHome <= 0.25; // Within 0.25 miles of home
+
                     // Check each pending precondition
                     for (CalendarPreConditionLinkEntity entity : pendingEntities) {
-                        // Skip if no stored location or precondition ID (not yet scheduled)
-                        if (entity.getStoredLatitude() == null || entity.getStoredLongitude() == null ||
-                            entity.getPreconditionId() == 0) {
+                        // Handle return home entities specially - cancel if vehicle is near home
+                        if (entity.getCalendarId().contains("_RETURN_HOME")) {
+                            if (isNearHome) {
+                                // Vehicle is near home - cancel return home preconditioning since vehicle is already home
+                                String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
+                                Boolean wasAway = entity.getWasVehicleAway();
+                                
+                                if (wasAway != null && wasAway) {
+                                    // Vehicle left and returned home - cancel since we're back
+                                    log.info("Cancelling return home preconditioning for {} - {} returned home after being away",
+                                            entity.getCalendarId(), getVehicleDisplayName(vin));
+                                    cancelExistingTasks(entity.getCalendarId());
+                                    entity.setStatus(PreconditioningStatus.EXPIRED);
+                                    entity.setDeleted(true);
+                                    calendarPreConditionLinkRepository.save(entity);
+                                    
+                                    sendSmsNotification("Return home preconditioning cancelled for " + getVehicleDisplayName(vin) + 
+                                            " - vehicle returned home (event: '" + eventName + "')");
+                                } else {
+                                    // Vehicle never left home area - cancel since no trip was made
+                                    log.info("Cancelling return home preconditioning for {} - {} is within 0.25 miles of home and never left",
+                                            entity.getCalendarId(), getVehicleDisplayName(vin));
+                                    cancelExistingTasks(entity.getCalendarId());
+                                    entity.setStatus(PreconditioningStatus.EXPIRED);
+                                    entity.setDeleted(true);
+                                    calendarPreConditionLinkRepository.save(entity);
+                                    
+                                    sendSmsNotification("Return home preconditioning skipped for " + getVehicleDisplayName(vin) + 
+                                            " - vehicle never left home (event: '" + eventName + "')");
+                                }
+                                continue;
+                            } else {
+                                // Vehicle is away from home - mark that it was away
+                                if (entity.getWasVehicleAway() == null || !entity.getWasVehicleAway()) {
+                                    entity.setWasVehicleAway(true);
+                                    calendarPreConditionLinkRepository.save(entity);
+                                    log.debug("Marked {} as having left home for return home entity {}", 
+                                            getVehicleDisplayName(vin), entity.getCalendarId());
+                                }
+                            }
+                        }
+
+                        // Skip if no stored location (can't calculate distance change)
+                        if (entity.getStoredLatitude() == null || entity.getStoredLongitude() == null) {
                             continue;
                         }
 
@@ -257,13 +472,14 @@ public class PreConditioningSchedulerService {
 
                         // If moved significantly (>0.5 miles), consider updating
                         if (distance > 0.5) {
-                            log.info("Vehicle {} moved {} miles from precondition location for event {} - considering update",
-                                    vin, String.format("%.2f", distance), entity.getCalendarId());
+                            log.info("{} moved {} miles from precondition location for event {} - considering update",
+                                    getVehicleDisplayName(vin), String.format("%.2f", distance), entity.getCalendarId());
 
                             // Check if we should update this precondition
                             if (shouldUpdatePreconditionDueToLocationChange(entity, currentLat, currentLon)) {
                                 log.info("Updating precondition for event {} due to location change after becoming stationary",
                                         entity.getCalendarId());
+                                // Update even if preconditionId is 0 - we still want to notify and update stored params
                                 updatePreconditionForNewLocation(entity, currentLat, currentLon);
                             }
                         }
@@ -322,11 +538,36 @@ public class PreConditioningSchedulerService {
     }
 
     /**
-     * Determine if a vehicle is currently traveling based on telemetry update frequency and distance moved
+     * Determine if a vehicle is currently traveling based on telemetry update frequency and distance moved.
+     * 
+     * IMPORTANT: This method also detects when a vehicle has PARKED by checking for stale location data.
+     * When a vehicle parks, location telemetry typically stops while other telemetry (battery, temp) continues.
+     * If we're receiving telemetry but location data is more than 5 minutes old, the vehicle has likely parked.
+     * 
      * @param vin Vehicle identification number
      * @return true if vehicle appears to be traveling (frequent location updates AND significant movement)
      */
     public boolean isVehicleTraveling(String vin) {
+        long currentTime = System.currentTimeMillis();
+        
+        // KEY FIX: Check if location data is stale while other telemetry is fresh
+        // This detects when a vehicle has parked (location stops but battery/temp continues)
+        Long lastLocationTime = vinLastLocationUpdateTime.get(vin);
+        Long lastTelemetryTime = vinLastTelemetryTime.get(vin);
+        
+        if (lastLocationTime != null && lastTelemetryTime != null) {
+            long locationAgeMs = currentTime - lastLocationTime;
+            long telemetryAgeMs = currentTime - lastTelemetryTime;
+            
+            // If location data is more than 5 minutes old BUT we received other telemetry recently (within 2 min),
+            // the vehicle has likely parked (location streaming stopped but other data continues)
+            if (locationAgeMs > 5 * 60 * 1000L && telemetryAgeMs < 2 * 60 * 1000L) {
+                log.debug("VIN {} detected as PARKED: location data is {}s old but other telemetry is {}s old",
+                        vin, locationAgeMs / 1000, telemetryAgeMs / 1000);
+                return false;
+            }
+        }
+        
         List<Long> timestamps = vinTelemetryTimestamps.get(vin);
         if (timestamps == null || timestamps.isEmpty()) {
             // No recent data, assume not traveling
@@ -334,7 +575,7 @@ public class PreConditioningSchedulerService {
         }
 
         // If no updates in the last 10 minutes, definitely not traveling
-        if (timestamps.get(timestamps.size() - 1) < System.currentTimeMillis() - 10 * 60 * 1000L) {
+        if (timestamps.get(timestamps.size() - 1) < currentTime - 10 * 60 * 1000L) {
             return false;
         }
 
@@ -436,10 +677,16 @@ public class PreConditioningSchedulerService {
                 return;
             }
 
+            String vin = entity.getVin();
+            String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
+            boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
+            
             // Calculate new timing from current location
             ZonedDateTime eventTime = Instant.ofEpochMilli(event.getStart().getDateTime().getValue())
                     .atZone(ZoneId.of("America/New_York"));
-            int newDesiredTime = calculateDesiredPreconditionTime(event, entity.getVin());
+            int newDesiredTime = calculateDesiredPreconditionTime(event, vin);
+            int oldDesiredTime = entity.getStoredPreconditionTime() != null ? entity.getStoredPreconditionTime() : 0;
+            int timeDifferenceMinutes = Math.abs(newDesiredTime - oldDesiredTime);
 
             // Update stored parameters
             smartScheduleManager.updateStoredParameters(entity, newDesiredTime,
@@ -463,6 +710,14 @@ public class PreConditioningSchedulerService {
 
             long newTaskTime = newPreconditionStart.toEpochSecond() * 1000 - (60 * 60 * 1000L);
             long currentTime = System.currentTimeMillis();
+
+            // Send SMS notification about the schedule update due to vehicle movement
+            String scheduleType = isReturnHome ? "Return home preconditioning" : "Preconditioning";
+            String timeChangeDesc = timeDifferenceMinutes > 0 ? 
+                    String.format(" (timing adjusted by %d min)", timeDifferenceMinutes) : "";
+            sendSmsNotification(scheduleType + " for " + getVehicleDisplayName(vin) + 
+                    " updated due to vehicle movement" + timeChangeDesc + 
+                    " - event: '" + eventName + "'");
 
             if (newTaskTime > currentTime + (5 * 60 * 1000L)) { // At least 5 minutes from now
                 log.info("Rescheduling preconditioning task for event {} to new time based on updated location",
@@ -504,50 +759,6 @@ public class PreConditioningSchedulerService {
     private final Map<String, ScheduledFuture<?>> scheduledVerificationTasks = new ConcurrentHashMap<>();
     @Autowired
     private EmailServiceImpl emailServiceImpl;
-
-    private boolean isVehicleDrivingToDestination(String vin, String destinationLocation) {
-        try {
-            if (!apiUsageTracker.canExecuteCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA)) {
-                log.debug("Cannot check driving state for VIN {} due to API rate limits", vin);
-                return false; // Conservative assumption - not driving if we can't check
-            }
-            VehicleData vehicleData = fleetApiService.getVehicleDataNoCache(vin);
-            apiUsageTracker.recordCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA);
-            VehicleData.DriveState driveState = vehicleData.getDrive_state();
-            
-            // Check if driveState is null (vehicle offline or not in driving state)
-            if (driveState == null) {
-                log.debug("DriveState is null for VIN {} - vehicle may be offline or not in driving state", vin);
-                return false; // Conservative assumption - not driving if no drive state data
-            }
-            
-            if (driveState.getShift_state() != null && 
-                (driveState.getShift_state().equals("D") || driveState.getShift_state().equals("R")) &&
-                driveState.getSpeed() != null && driveState.getSpeed() > 0) {
-                
-                // Check if vehicle has active route to the destination
-                if (driveState.getActive_route_destination() != null &&
-                    driveState.getActive_route_destination().contains(destinationLocation.split(",")[0])) {
-                    return true;
-                }
-                
-                // Fallback: check if vehicle is moving away from home towards destination
-                if (driveState.getLatitude() != null && driveState.getLongitude() != null) {
-                    double currentLat = driveState.getLatitude();
-                    double currentLon = driveState.getLongitude();
-                    double distanceFromHome = calculateDistance(currentLat, currentLon, homeLatitude, homeLongitude);
-                    
-                    return distanceFromHome > homeRadiusMiles; // More than configured radius from home
-                } else {
-                    log.debug("Location data not available for VIN {}", vin);
-                    return false; // Can't determine location, assume not driving
-                }
-            }
-        } catch (Exception e) {
-            log.warn("Failed to check vehicle driving state for vin: {}", vin, e);
-        }
-        return false;
-    }
     
     private double calculateDistance(double lat1, double lon1, double lat2, double lon2) {
         final double R = 3959; // Earth radius in miles
@@ -571,7 +782,7 @@ public class PreConditioningSchedulerService {
     List<CalendarPreConditionLinkEntity> managedEntities,
                                                                                         List<Event> currentEvents) throws InterruptedException {
         log.info("=== SMART CLEANUP START ===");
-        log.info("Starting smart preconditioning cleanup for vin: {}", vin);
+        log.info("Starting smart preconditioning cleanup for {}", getVehicleDisplayName(vin));
         log.info("Managed entities count: {}", managedEntities.size());
         log.info("Current events count: {}", currentEvents.size());
         
@@ -586,7 +797,7 @@ public class PreConditioningSchedulerService {
             // Step 1: Wake the vehicle and verify it's awake (if needed)
             log.info("Step 1: Waking vehicle if needed");
             if (!wakeVehicleWithProperTracking(vin, 3)) {
-                log.error("Failed to wake vehicle {} for preconditioning cleanup", vin);
+                log.error("Failed to wake {} for preconditioning cleanup", getVehicleDisplayName(vin));
                 log.info("=== SMART CLEANUP END (WAKE FAILED) ===");
                 return Collections.emptyList();
             }
@@ -595,6 +806,7 @@ public class PreConditioningSchedulerService {
             log.info("Step 3: Getting current preconditioning schedules");
             VehicleData vehicleData = fleetApiService.getVehicleDataNoCache(vin);
             apiUsageTracker.recordCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA);
+            extractVehicleNameFromApiResponse(vin, vehicleData);
             
             List<VehicleData.PreconditionSchedule> allSchedules = safeGetPreconditionSchedules(vehicleData);
             log.info("Found {} preconditioning schedules on vehicle", allSchedules.size());
@@ -984,7 +1196,7 @@ public class PreConditioningSchedulerService {
         
         // Step 1: Wake the vehicle and run cleanup
         if (!wakeVehicleWithProperTracking(vin, 3)) {
-            log.error("Failed to wake vehicle {} for preconditioning scheduling", vin);
+            log.error("Failed to wake {} for preconditioning scheduling", getVehicleDisplayName(vin));
             log.info("=== SCHEDULING VEHICLE PRECONDITIONS END (WAKE FAILED) ===");
             return false;
         }
@@ -1002,8 +1214,9 @@ public class PreConditioningSchedulerService {
         if (apiUsageTracker.canExecuteCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA)) {
             vehicleData = fleetApiService.getVehicleDataNoCache(vin);
             apiUsageTracker.recordCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA);
+            extractVehicleNameFromApiResponse(vin, vehicleData);
         } else {
-            log.error("Cannot get vehicle data for VIN {} due to API rate limits", vin);
+            log.error("Cannot get vehicle data for {} due to API rate limits", getVehicleDisplayName(vin));
             log.info("=== SCHEDULING VEHICLE PRECONDITIONS END (RATE LIMITED) ===");
             return false;
         }
@@ -1043,7 +1256,11 @@ public class PreConditioningSchedulerService {
                         .orElse(null);
                         
                 if (returnEntity != null) {
-                    schedulingTasks.add(createReturnHomeSchedulingTask(event, returnEntity, vin));
+                    SchedulingTask returnTask = createReturnHomeSchedulingTask(event, returnEntity, vin);
+                    if (returnTask != null) {
+                        schedulingTasks.add(returnTask);
+                    }
+                    // If null, vehicle is traveling - will be scheduled when it becomes stationary
                 }
             }
         }
@@ -1123,7 +1340,11 @@ public class PreConditioningSchedulerService {
     }
     
     /**
-     * Create a scheduling task for a return home event
+     * Create a scheduling task for a return home event.
+     * 
+     * IMPORTANT: If the vehicle is currently traveling, this will return null to signal
+     * that the task should be deferred until the vehicle becomes stationary.
+     * This prevents scheduling preconditioning at a temporary/moving location.
      */
     private SchedulingTask createReturnHomeSchedulingTask(Event event, CalendarPreConditionLinkEntity entity, String vin) {
         ZonedDateTime returnTime = Instant.ofEpochMilli(event.getEnd().getDateTime().getValue())
@@ -1141,11 +1362,21 @@ public class PreConditioningSchedulerService {
             long eventStartTime = event.getStart().getDateTime().getValue();
             
             if (currentTime >= eventStartTime) {
-                // Event has started - use current vehicle location (should be at destination)
+                // Event has started - check if vehicle is still traveling
+                if (isVehicleTraveling(vin)) {
+                    // Vehicle is still in transit - don't use the moving location!
+                    // Return null to signal that this task should be deferred
+                    log.info("Vehicle {} is still traveling - deferring return home preconditioning until stationary", 
+                            getVehicleDisplayName(vin));
+                    return null;
+                }
+                
+                // Vehicle is stationary - use current location (should be at destination)
                 double[] currentLocation = getCurrentVehicleLocation(vin);
                 vehicleLat = currentLocation[0];
                 vehicleLon = currentLocation[1];
-                log.info("Using current vehicle location for return home calculation: {}, {} (event started)", vehicleLat, vehicleLon);
+                log.info("Using current vehicle location for return home calculation: {}, {} (event started, vehicle stationary)", 
+                        vehicleLat, vehicleLon);
             } else {
                 // Event hasn't started yet - estimate using home location as fallback
                 log.debug("Event {} hasn't started yet, using home location for return route estimation", event.getId());
@@ -1527,12 +1758,12 @@ public class PreConditioningSchedulerService {
         
         // Phase 2: Normal 4-hour window logic for local vehicles
         if (distanceFromHome < homeRadiusMiles) {
-            log.info("Vehicle {} is within home radius ({} miles), using home location for scheduling", vin, homeRadiusMiles);
+            log.info("{} is within home radius ({} miles), using home location for scheduling", getVehicleDisplayName(vin), homeRadiusMiles);
             return false;
         }
         
         // Vehicle is away from home within 4-hour window - use current location
-        log.info("Vehicle {} is away from home within 4-hour window, using current location for scheduling", vin);
+        log.info("{} is away from home within 4-hour window, using current location for scheduling", getVehicleDisplayName(vin));
         return true;
     }
 
@@ -1614,19 +1845,24 @@ public class PreConditioningSchedulerService {
 
             String vin = emailToVinMap.get(assigneeEmail);
 
-            // Check if entity exists and is pending
+            // Check if entity exists
             Optional<CalendarPreConditionLinkEntity> existingEntity =
-                    calendarPreConditionLinkRepository.findByCalendarId(event.getId());
+                    calendarPreConditionLinkRepository.findFirstByCalendarId(event.getId());
 
-            if (existingEntity.isPresent() &&
-                existingEntity.get().getStatus() == PreconditioningStatus.PENDING) {
-
-                // Check if we should schedule now (within urgent window)
-                int desiredPreconditionTime = calculateDesiredPreconditionTime(event, vin);
-                if (shouldScheduleEventNow(event, desiredPreconditionTime, 15)) { // 15 min tolerance for urgent
-                    log.info("Urgent scheduling triggered for event {} - within 1 hour window", event.getId());
-                    processCalendarEventWithTaskScheduling(event, vinToEmailMap, events);
+            if (existingEntity.isPresent()) {
+                // Entity exists - only process if it's still PENDING
+                if (existingEntity.get().getStatus() == PreconditioningStatus.PENDING) {
+                    // Check if we should schedule now (within urgent window)
+                    int desiredPreconditionTime = calculateDesiredPreconditionTime(event, vin);
+                    if (shouldScheduleEventNow(event, desiredPreconditionTime, 15)) { // 15 min tolerance for urgent
+                        log.info("Urgent scheduling triggered for existing event {} - within 1 hour window", event.getId());
+                        processCalendarEventWithTaskScheduling(event, vinToEmailMap, events);
+                    }
                 }
+            } else {
+                // Entity doesn't exist - this is a new urgent event that needs to be tracked and scheduled
+                log.info("Creating tracking entry for new urgent event {} (within 1 hour of start)", event.getId());
+                processCalendarEventWithTaskScheduling(event, emailToVinMap, events);
             }
         }
     }
@@ -1821,7 +2057,7 @@ public class PreConditioningSchedulerService {
                 log.info("Calendar Event: {}", calendarId);
                 
                 // Re-fetch entity to get current state
-                Optional<CalendarPreConditionLinkEntity> entityOpt = calendarPreConditionLinkRepository.findByCalendarId(calendarId);
+                Optional<CalendarPreConditionLinkEntity> entityOpt = calendarPreConditionLinkRepository.findFirstByCalendarId(calendarId);
                 if (entityOpt.isEmpty()) {
                     log.warn("Entity for calendar event {} no longer exists, skipping", calendarId);
                     return;
@@ -2099,7 +2335,7 @@ public class PreConditioningSchedulerService {
      * Execute verification task - check if schedule exists, wake and retry if not
      */
     private void executeVerificationTask(String calendarId, Map<String, String> vinToEmailMap) {
-        Optional<CalendarPreConditionLinkEntity> entityOpt = calendarPreConditionLinkRepository.findByCalendarId(calendarId);
+        Optional<CalendarPreConditionLinkEntity> entityOpt = calendarPreConditionLinkRepository.findFirstByCalendarId(calendarId);
         if (entityOpt.isEmpty()) {
             log.debug("Entity for calendar event {} no longer exists during verification", calendarId);
             return;
@@ -2109,9 +2345,7 @@ public class PreConditioningSchedulerService {
         
         // CIRCUIT BREAKER: Check if verification is still needed
         if (entity.getStatus() == PreconditioningStatus.ACTIVE) {
-            long currentMinutesOfDay = Instant.now().atZone(ZoneId.of("America/New_York")).getHour() * 60 + Instant.now().atZone(ZoneId.of("America/New_York")).getMinute();
-            String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
-            sendSmsNotification("Preconditioning on vehicle " + entity.getVin() + " scheduled for " +  (entity.getStoredPreconditionTime() - currentMinutesOfDay) + " minutes from now for event '" + eventName + "' at " +  new Date(entity.getUnixStartTime()));
+            sendSmsNotification(buildPreconditioningConfirmationSms(entity));
             log.info("🔄 Entity {} already verified (likely during cleanup), skipping verification task", calendarId);
             return;
         }
@@ -2126,9 +2360,7 @@ public class PreConditioningSchedulerService {
             entity.setStatus(PreconditioningStatus.ACTIVE);
             entity.setLastVerifiedTimestamp(System.currentTimeMillis());
             scheduleWeatherCheck(entity.getStoredPreconditionTime());
-            long currentMinutesOfDay = Instant.now().atZone(ZoneId.of("America/New_York")).getHour() * 60 + Instant.now().atZone(ZoneId.of("America/New_York")).getMinute();
-            String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
-            sendSmsNotification("Preconditioning on vehicle " + entity.getVin() + " scheduled for " +  (entity.getStoredPreconditionTime() - currentMinutesOfDay) + " minutes from now for event '" + eventName + "' at " +  new Date(entity.getUnixStartTime()));
+            sendSmsNotification(buildPreconditioningConfirmationSms(entity));
             calendarPreConditionLinkRepository.save(entity);
             return;
         }
@@ -2180,9 +2412,7 @@ public class PreConditioningSchedulerService {
                             .findFirst()
                             .ifPresent(schedule -> entity.setPreconditionId(schedule.getId()));
                     scheduleWeatherCheck(entity.getStoredPreconditionTime());
-                    long currentMinutesOfDay = Instant.now().atZone(ZoneId.of("America/New_York")).getHour() * 60 + Instant.now().atZone(ZoneId.of("America/New_York")).getMinute();
-                    String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
-                    sendSmsNotification("Preconditioning on vehicle " + entity.getVin() + " scheduled for " +  (entity.getStoredPreconditionTime() - currentMinutesOfDay) + " minutes from now for event '" + eventName + "' at " +  new Date(entity.getUnixStartTime()));
+                    sendSmsNotification(buildPreconditioningConfirmationSms(entity));
                     calendarPreConditionLinkRepository.save(entity);
                 } else {
                     log.warn("Verification failed - retrying preconditioning scheduling for event {}", calendarId);
@@ -2217,8 +2447,14 @@ public class PreConditioningSchedulerService {
         if (triggeringEvent != null) {
             if (triggeringEntity.getCalendarId().contains("_RETURN_HOME")) {
                 // This is a return home task - create return home scheduling task
-                tasks.add(createReturnHomeSchedulingTask(triggeringEvent, triggeringEntity, vin));
-                log.debug("Added return home task for triggering entity {}", triggeringEntity.getCalendarId());
+                SchedulingTask returnTask = createReturnHomeSchedulingTask(triggeringEvent, triggeringEntity, vin);
+                if (returnTask != null) {
+                    tasks.add(returnTask);
+                    log.debug("Added return home task for triggering entity {}", triggeringEntity.getCalendarId());
+                } else {
+                    log.info("Return home task deferred for {} - vehicle is still traveling", triggeringEntity.getCalendarId());
+                    return 0; // Will be scheduled when vehicle becomes stationary
+                }
             } else {
                 // This is a regular departure task
                 tasks.add(createSchedulingTask(triggeringEvent, triggeringEntity, vin, allEvents));
@@ -2246,8 +2482,12 @@ public class PreConditioningSchedulerService {
                             .orElse(null);
                             
                     if (parentEvent != null && shouldScheduleReturnHome(parentEvent, allEvents)) {
-                        tasks.add(createReturnHomeSchedulingTask(parentEvent, entity, vin));
-                        log.debug("Added additional return home task for entity {}", entity.getCalendarId());
+                        SchedulingTask returnTask = createReturnHomeSchedulingTask(parentEvent, entity, vin);
+                        if (returnTask != null) {
+                            tasks.add(returnTask);
+                            log.debug("Added additional return home task for entity {}", entity.getCalendarId());
+                        }
+                        // If null, vehicle is traveling - will be scheduled when it becomes stationary
                     }
                 }
             }
@@ -2288,6 +2528,12 @@ public class PreConditioningSchedulerService {
         SchedulingTask task;
         if (triggeringEntity.getCalendarId().contains("_RETURN_HOME")) {
             task = createReturnHomeSchedulingTask(triggeringEvent, triggeringEntity, vin);
+            if (task == null) {
+                // Vehicle is still traveling - defer until stationary
+                log.info("Deferring return home preconditioning for {} - vehicle is still traveling", 
+                        triggeringEntity.getCalendarId());
+                return 0; // Will be scheduled when vehicle becomes stationary via checkPendingPreconditionsForLocationUpdate
+            }
             log.info("Executing focused return home preconditioning for {}", triggeringEntity.getCalendarId());
         } else {
             task = createSchedulingTask(triggeringEvent, triggeringEntity, vin, allEvents);
@@ -2437,7 +2683,7 @@ public class PreConditioningSchedulerService {
      * @return The tracked entity, or null if event couldn't be tracked
      */
     private CalendarPreConditionLinkEntity trackCalendarEvent(Event event, Map<String, String> emailToVinMap, List<Event> allEvents) {
-        Optional<CalendarPreConditionLinkEntity> existingEntity = calendarPreConditionLinkRepository.findByCalendarId(event.getId());
+        Optional<CalendarPreConditionLinkEntity> existingEntity = calendarPreConditionLinkRepository.findFirstByCalendarId(event.getId());
         CalendarPreConditionLinkEntity entityToProcess;
         
         // Handle duplicate entries
@@ -2565,7 +2811,7 @@ public class PreConditioningSchedulerService {
                 
                 // Check if we already have a return home entry
                 Optional<CalendarPreConditionLinkEntity> existingEntity = 
-                        calendarPreConditionLinkRepository.findByCalendarId(returnHomeCalendarId);
+                        calendarPreConditionLinkRepository.findFirstByCalendarId(returnHomeCalendarId);
                 
                 CalendarPreConditionLinkEntity returnEntity;
                 if (existingEntity.isPresent()) {
@@ -2683,13 +2929,14 @@ public class PreConditioningSchedulerService {
         if (apiUsageTracker.canExecuteCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA)) {
             VehicleData freshData = fleetApiService.getVehicleDataNoCache(vin);
             apiUsageTracker.recordCommand(vin, VehicleApiUsageTracker.CommandType.GET_DATA);
+            extractVehicleNameFromApiResponse(vin, freshData);
             
             // Cache the fresh data
             vehicleDataCache.cacheVehicleData(vin, freshData, false);
-            log.debug("Fetched and cached fresh vehicle data for VIN {}", vin);
+            log.debug("Fetched and cached fresh vehicle data for {}", getVehicleDisplayName(vin));
             return freshData;
         } else {
-            log.debug("Cannot fetch vehicle data for VIN {} due to API rate limits", vin);
+            log.debug("Cannot fetch vehicle data for {} due to API rate limits", getVehicleDisplayName(vin));
             return null;
         }
     }
@@ -2741,7 +2988,7 @@ public class PreConditioningSchedulerService {
                 try {
                     // Re-fetch entity to ensure it still exists
                     Optional<CalendarPreConditionLinkEntity> entityOpt = 
-                            calendarPreConditionLinkRepository.findByCalendarId(returnEntity.getCalendarId());
+                            calendarPreConditionLinkRepository.findFirstByCalendarId(returnEntity.getCalendarId());
                     if (entityOpt.isPresent() && !entityOpt.get().isDeleted()) {
                         log.info("Event {} has started, now scheduling return home preconditioning task", parentEvent.getId());
                         scheduleReturnHomeTaskAfterEventStart(parentEvent, entityOpt.get(), vinToEmailMap);
@@ -2765,6 +3012,38 @@ public class PreConditioningSchedulerService {
         if (scheduleTaskTime == -1) {
             log.debug("Event {} has ended, no return home task needed", parentEvent.getId());
             return;
+        }
+        
+        String vin = returnEntity.getVin();
+        String eventName = returnEntity.getEventSummary() != null ? returnEntity.getEventSummary() : "Unknown Event";
+        
+        // Check if vehicle is still near home (within 0.25 miles) - if so, skip return home preconditioning
+        double[] currentLocation = getCurrentVehicleLocation(vin);
+        double distanceFromHome = calculateDistance(currentLocation[0], currentLocation[1], homeLatitude, homeLongitude);
+        if (distanceFromHome <= 0.25) {
+            // Vehicle is still at home - check if it was ever away
+            Boolean wasAway = returnEntity.getWasVehicleAway();
+            if (wasAway == null || !wasAway) {
+                log.info("Skipping return home preconditioning for {} - {} is within 0.25 miles of home and never left",
+                        returnEntity.getCalendarId(), getVehicleDisplayName(vin));
+                returnEntity.setStatus(PreconditioningStatus.EXPIRED);
+                returnEntity.setDeleted(true);
+                calendarPreConditionLinkRepository.save(returnEntity);
+                sendSmsNotification("Return home preconditioning skipped for " + getVehicleDisplayName(vin) + 
+                        " - vehicle is already home (event: '" + eventName + "')");
+                return;
+            }
+            // Vehicle was away and returned - this is expected for return home
+            log.info("{} is back home after being away - proceeding with return home preconditioning for {}",
+                    getVehicleDisplayName(vin), returnEntity.getCalendarId());
+        } else {
+            // Vehicle is away from home - mark it and proceed with scheduling
+            if (returnEntity.getWasVehicleAway() == null || !returnEntity.getWasVehicleAway()) {
+                returnEntity.setWasVehicleAway(true);
+                calendarPreConditionLinkRepository.save(returnEntity);
+                log.info("{} is away from home ({} miles), return home preconditioning will be scheduled for {}",
+                        getVehicleDisplayName(vin), String.format("%.2f", distanceFromHome), returnEntity.getCalendarId());
+            }
         }
         
         // Check if we already have a task scheduled for this return home entry
@@ -2843,7 +3122,7 @@ public class PreConditioningSchedulerService {
                 try {
                     // Re-fetch entity to avoid optimistic locking issues
                     Optional<CalendarPreConditionLinkEntity> freshEntity = 
-                        calendarPreConditionLinkRepository.findByCalendarId(event.getId());
+                        calendarPreConditionLinkRepository.findFirstByCalendarId(event.getId());
                     if (freshEntity.isPresent()) {
                         checkCompletionInternal(event, freshEntity.get(), vin, desiredPreConditioningTime, dayOfWeek);
                     } else {
@@ -2876,7 +3155,7 @@ public class PreConditioningSchedulerService {
     }
 
     public void scheduleDefrost(String vin, Long minutesUntilDefrost) {
-        log.info("Scheduling defrost for vin: {} in {} minutes", vin, minutesUntilDefrost);
+        log.info("Scheduling defrost for {} in {} minutes", getVehicleDisplayName(vin), minutesUntilDefrost);
         vinDefrostMap.put(vin, System.currentTimeMillis() + (1000L * 60 * minutesUntilDefrost));
         scheduler.schedule(() -> {
             boolean defrostScheduled = false;
@@ -2898,10 +3177,10 @@ public class PreConditioningSchedulerService {
             }
             
             if (defrostScheduled) {
-                log.info("Successfully started defrost for vin: {}", vin);
-                sendSmsNotification("Defrost started for VIN " + vin);
+                log.info("Successfully started defrost for {}", getVehicleDisplayName(vin));
+                sendSmsNotification("Defrost started for " + getVehicleDisplayName(vin));
             } else {
-                log.info("Failed to start defrost for vin: {}", vin);
+                log.info("Failed to start defrost for {}", getVehicleDisplayName(vin));
             }
             vinDefrostMap.remove(vin);
         }, minutesUntilDefrost, TimeUnit.MINUTES);
@@ -2982,7 +3261,7 @@ public class PreConditioningSchedulerService {
                 Map<String, Double> vinExteriorTemperatureMap = new HashMap<>();
                 for (Event event : events) {
                     if (event.getLocation() == null) continue;
-                    Optional<CalendarPreConditionLinkEntity> entity = calendarPreConditionLinkRepository.findByCalendarId(event.getId());
+                    Optional<CalendarPreConditionLinkEntity> entity = calendarPreConditionLinkRepository.findFirstByCalendarId(event.getId());
                     if (!entity.isPresent()) {
                         continue;
                     }
@@ -2991,7 +3270,7 @@ public class PreConditioningSchedulerService {
                     Double exteriorTemperature = vinOutsideTempMap.get(vin);
                     
                     if (exteriorTemperature != null && exteriorTemperature > 1) {
-                        log.info("Vin {} has high temperature ({}), skipping defrost because vehicle might be garaged", vin, exteriorTemperature);
+                        log.info("{} has high temperature ({}°), skipping defrost because vehicle might be garaged", getVehicleDisplayName(vin), exteriorTemperature);
                         continue;
                     }
                     ZonedDateTime nyTime = Instant.ofEpochSecond(entity.get().getUnixStartTime() / 1000)

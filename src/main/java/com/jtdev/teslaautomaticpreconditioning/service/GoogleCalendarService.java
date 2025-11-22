@@ -27,4 +27,21 @@ public class GoogleCalendarService {
                 .setTimeMax(new DateTime(System.currentTimeMillis() + 1000L * 60L * 60L * 24L * 2L))
                 .execute();
     }
+
+    /**
+     * Get calendar events within a specific date range
+     * @param startMillis Start time in milliseconds
+     * @param endMillis End time in milliseconds
+     * @return Events within the specified range
+     * @throws IOException if calendar API call fails
+     */
+    public Events getEventsInDateRange(long startMillis, long endMillis) throws IOException {
+        return calendar.events().list(calendarName)
+                .setOrderBy("startTime")
+                .setSingleEvents(true)
+                .setMaxResults(2500)
+                .setTimeMin(new DateTime(startMillis))
+                .setTimeMax(new DateTime(endMillis))
+                .execute();
+    }
 }
