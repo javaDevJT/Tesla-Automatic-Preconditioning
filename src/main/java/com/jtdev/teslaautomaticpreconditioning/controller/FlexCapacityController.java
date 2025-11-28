@@ -35,17 +35,17 @@ public class FlexCapacityController {
         LocalDate sevenDaysAgo = today.minusDays(7);
         LocalDate sevenDaysFromNow = today.plusDays(7);
 
-        // Fetch events from 7 days ago to 7 days from now
-        ZonedDateTime rangeStart = sevenDaysAgo.atStartOfDay(TIMEZONE);
-        ZonedDateTime rangeEnd = sevenDaysFromNow.atTime(23, 59, 59).atZone(TIMEZONE);
+        // Initial fetch to find earliest relevant flex event
+        ZonedDateTime initialRangeStart = sevenDaysAgo.atStartOfDay(TIMEZONE);
+        ZonedDateTime initialRangeEnd = sevenDaysFromNow.atTime(23, 59, 59).atZone(TIMEZONE);
 
-        Events events = googleCalendarService.getEventsInDateRange(
-                rangeStart.toInstant().toEpochMilli(),
-                rangeEnd.toInstant().toEpochMilli()
+        Events initialEvents = googleCalendarService.getEventsInDateRange(
+                initialRangeStart.toInstant().toEpochMilli(),
+                initialRangeEnd.toInstant().toEpochMilli()
         );
 
         // Filter for flex events (case-insensitive)
-        List<Event> flexEvents = events.getItems().stream()
+        List<Event> initialFlexEvents = initialEvents.getItems().stream()
                 .filter(e -> e.getSummary() != null && 
                            e.getSummary().toLowerCase().contains("flex") &&
                            e.getStart() != null && e.getStart().getDateTime() != null)
@@ -53,8 +53,8 @@ public class FlexCapacityController {
 
         // Find earliest flex event to determine display start date
         LocalDate displayStart = today;
-        if (!flexEvents.isEmpty()) {
-            LocalDate earliestFlexDate = flexEvents.stream()
+        if (!initialFlexEvents.isEmpty()) {
+            LocalDate earliestFlexDate = initialFlexEvents.stream()
                     .map(e -> Instant.ofEpochMilli(e.getStart().getDateTime().getValue())
                             .atZone(TIMEZONE)
                             .toLocalDate())
@@ -68,6 +68,23 @@ public class FlexCapacityController {
         }
 
         LocalDate displayEnd = sevenDaysFromNow;
+
+        // Now fetch events with extended range to cover trailing 7-day calculations
+        // For accurate trailing 7-day totals, we need data from 6 days before displayStart
+        LocalDate dataFetchStart = displayStart.minusDays(6);
+        ZonedDateTime extendedRangeStart = dataFetchStart.atStartOfDay(TIMEZONE);
+        
+        Events allEvents = googleCalendarService.getEventsInDateRange(
+                extendedRangeStart.toInstant().toEpochMilli(),
+                initialRangeEnd.toInstant().toEpochMilli()
+        );
+
+        // Filter for flex events from extended range
+        List<Event> flexEvents = allEvents.getItems().stream()
+                .filter(e -> e.getSummary() != null && 
+                           e.getSummary().toLowerCase().contains("flex") &&
+                           e.getStart() != null && e.getStart().getDateTime() != null)
+                .collect(Collectors.toList());
 
         // Build day-by-day data
         Map<LocalDate, DayData> dayDataMap = new LinkedHashMap<>();
