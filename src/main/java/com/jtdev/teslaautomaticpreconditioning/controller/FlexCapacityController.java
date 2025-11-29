@@ -92,6 +92,39 @@ public class FlexCapacityController {
             dayDataMap.put(date, calculateDayData(date, flexEvents));
         }
 
+        // Second pass: adjust available capacity based on forward-looking constraints
+        // Adding hours to day N affects trailing totals for days N through N+6
+        for (LocalDate date = displayStart; !date.isAfter(displayEnd); date = date.plusDays(1)) {
+            DayData currentDay = dayDataMap.get(date);
+            double constrainedCapacity = currentDay.availableCapacity;
+            
+            // Check next 6 days - adding hours to current day will affect their trailing totals
+            for (int i = 1; i <= 6; i++) {
+                LocalDate futureDate = date.plusDays(i);
+                DayData futureDay = dayDataMap.get(futureDate);
+                if (futureDay != null) {
+                    // If we add X hours to current day, future day's trailing total increases by X
+                    // So max we can add is: 40 - futureDay.trailing7DayHours
+                    constrainedCapacity = Math.min(constrainedCapacity, 
+                                                   MAX_WEEKLY_HOURS - futureDay.trailing7DayHours);
+                }
+            }
+            
+            currentDay.availableCapacity = Math.max(0, constrainedCapacity);
+            
+            // Update status color based on constrained capacity
+            if (currentDay.availableCapacity >= 4.1) {
+                currentDay.statusColor = "green";
+                currentDay.statusEmoji = "🟢";
+            } else if (currentDay.availableCapacity >= 1.0) {
+                currentDay.statusColor = "yellow";
+                currentDay.statusEmoji = "🟡";
+            } else {
+                currentDay.statusColor = "red";
+                currentDay.statusEmoji = "🔴";
+            }
+        }
+
         // Generate HTML
         return generateHtml(dayDataMap, today);
     }
@@ -234,6 +267,8 @@ public class FlexCapacityController {
             
             // Metrics
             html.append("<div class='metrics'>\n");
+            html.append("<div class='metric-row'><span class='metric-label'>Day total:</span> <span class='metric-value'>")
+                .append(String.format("%.1f", data.hoursThisDay)).append("h</span></div>\n");
             html.append("<div class='metric-row'><span class='metric-label'>7-day total:</span> <span class='metric-value'>")
                 .append(String.format("%.1f", data.trailing7DayHours)).append("h</span></div>\n");
             html.append("<div class='metric-row'><span class='metric-label'>Available:</span> <span class='metric-value'>")
