@@ -2708,9 +2708,15 @@ public class PreConditioningSchedulerService {
             
             // Update event time if it has changed
             if (entityToProcess.getUnixStartTime() != event.getStart().getDateTime().getValue()) {
-                log.info("Event {} start time changed, updating tracking", event.getId());
+                log.info("Event {} start time changed from {} to {} - cancelling task and forcing reschedule", 
+                        event.getId(), 
+                        new java.util.Date(entityToProcess.getUnixStartTime()),
+                        new java.util.Date(event.getStart().getDateTime().getValue()));
                 entityToProcess.setUnixStartTime(event.getStart().getDateTime().getValue());
                 entityToProcess.setStatus(PreconditioningStatus.PENDING); // Reset for re-evaluation
+                
+                // Cancel existing scheduled task since timing has changed
+                cancelExistingTasks(event.getId());
             }
             
             // Update event summary if it has changed
@@ -2739,15 +2745,34 @@ public class PreConditioningSchedulerService {
         return null;
         }
 
-        String vin = emailToVinMap.get(emailToAssign);
+        String newVin = emailToVinMap.get(emailToAssign);
+        String oldVin = entityToProcess.getVin();
+        
+        // Detect VIN change (assignee changed)
+        boolean vinChanged = oldVin != null && !oldVin.equals(newVin);
+        if (vinChanged) {
+            log.warn("Event {} assignee changed from VIN {} ({}) to VIN {} ({}) - cancelling old task and forcing reschedule",
+                    event.getId(), oldVin, getVehicleDisplayName(oldVin), newVin, getVehicleDisplayName(newVin));
+            
+            // Cancel existing scheduled task
+            cancelExistingTasks(event.getId());
+            
+            // Reset status to PENDING to force re-evaluation and rescheduling
+            entityToProcess.setStatus(PreconditioningStatus.PENDING);
+            
+            // Send SMS notification about the change
+            String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
+            sendSmsNotification(String.format("Event assignee changed: '%s' reassigned from %s to %s", 
+                    eventName, getVehicleDisplayName(oldVin), getVehicleDisplayName(newVin)));
+        }
         
         // Update entity
         entityToProcess.setAttendeeEmail(emailToAssign);
-        entityToProcess.setVin(vin);
+        entityToProcess.setVin(newVin);
         
         // Save entity with PENDING status for later 1-hour evaluation
         calendarPreConditionLinkRepository.save(entityToProcess);
-        log.debug("Tracked calendar event {} for VIN {} (status: {})", event.getId(), vin, entityToProcess.getStatus());
+        log.debug("Tracked calendar event {} for VIN {} (status: {})", event.getId(), newVin, entityToProcess.getStatus());
         
         return entityToProcess;
     }
