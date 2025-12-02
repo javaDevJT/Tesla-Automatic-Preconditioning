@@ -2708,15 +2708,24 @@ public class PreConditioningSchedulerService {
             
             // Update event time if it has changed
             if (entityToProcess.getUnixStartTime() != event.getStart().getDateTime().getValue()) {
+                java.util.Date oldTime = new java.util.Date(entityToProcess.getUnixStartTime());
+                java.util.Date newTime = new java.util.Date(event.getStart().getDateTime().getValue());
+                
                 log.info("Event {} start time changed from {} to {} - cancelling task and forcing reschedule", 
-                        event.getId(), 
-                        new java.util.Date(entityToProcess.getUnixStartTime()),
-                        new java.util.Date(event.getStart().getDateTime().getValue()));
-                entityToProcess.setUnixStartTime(event.getStart().getDateTime().getValue());
-                entityToProcess.setStatus(PreconditioningStatus.PENDING); // Reset for re-evaluation
+                        event.getId(), oldTime, newTime);
                 
                 // Cancel existing scheduled task since timing has changed
                 cancelExistingTasks(event.getId());
+                
+                // Update time and reset status
+                entityToProcess.setUnixStartTime(event.getStart().getDateTime().getValue());
+                entityToProcess.setStatus(PreconditioningStatus.PENDING); // Reset for re-evaluation
+                
+                // Send SMS notification about time change
+                String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
+                java.text.SimpleDateFormat timeFormat = new java.text.SimpleDateFormat("h:mm a");
+                sendSmsNotification(String.format("Event '%s' time changed from %s to %s - preconditioning will be rescheduled",
+                        eventName, timeFormat.format(oldTime), timeFormat.format(newTime)));
             }
             
             // Update event summary if it has changed
@@ -3372,6 +3381,15 @@ public class PreConditioningSchedulerService {
             cancelExistingTasks(entity.getCalendarId());
             entity.setStatus(PreconditioningStatus.EXPIRED);
             entity.setDeleted(true);
+            
+            // Send SMS notification about deleted event
+            String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
+            String vin = entity.getVin();
+            boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
+            String eventType = isReturnHome ? "Return home preconditioning" : "Preconditioning";
+            
+            sendSmsNotification(String.format("%s cancelled for %s - calendar event '%s' was deleted",
+                    eventType, getVehicleDisplayName(vin), eventName));
         });
         calendarPreConditionLinkRepository.saveAll(entitiesToDelete);
         
