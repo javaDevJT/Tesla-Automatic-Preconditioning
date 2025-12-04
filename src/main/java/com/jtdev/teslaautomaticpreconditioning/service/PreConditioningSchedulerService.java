@@ -425,6 +425,9 @@ public class PreConditioningSchedulerService {
                                 String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
                                 Boolean wasAway = entity.getWasVehicleAway();
                                 
+                                // Only notify if preconditioning was actually sent to vehicle (ACTIVE status)
+                                boolean shouldNotify = entity.getStatus() == PreconditioningStatus.ACTIVE;
+                                
                                 if (wasAway != null && wasAway) {
                                     // Vehicle left and returned home - cancel since we're back
                                     log.info("Cancelling return home preconditioning for {} - {} returned home after being away",
@@ -434,8 +437,10 @@ public class PreConditioningSchedulerService {
                                     entity.setDeleted(true);
                                     calendarPreConditionLinkRepository.save(entity);
                                     
-                                    sendSmsNotification("Return home preconditioning cancelled for " + getVehicleDisplayName(vin) + 
-                                            " - vehicle returned home (event: '" + eventName + "')");
+                                    if (shouldNotify) {
+                                        sendSmsNotification("Return home preconditioning cancelled for " + getVehicleDisplayName(vin) + 
+                                                " - vehicle returned home (event: '" + eventName + "')");
+                                    }
                                 } else {
                                     // Vehicle never left home area - cancel since no trip was made
                                     log.info("Cancelling return home preconditioning for {} - {} is within 0.25 miles of home and never left",
@@ -445,8 +450,10 @@ public class PreConditioningSchedulerService {
                                     entity.setDeleted(true);
                                     calendarPreConditionLinkRepository.save(entity);
                                     
-                                    sendSmsNotification("Return home preconditioning skipped for " + getVehicleDisplayName(vin) + 
-                                            " - vehicle never left home (event: '" + eventName + "')");
+                                    if (shouldNotify) {
+                                        sendSmsNotification("Return home preconditioning skipped for " + getVehicleDisplayName(vin) + 
+                                                " - vehicle never left home (event: '" + eventName + "')");
+                                    }
                                 }
                                 continue;
                             } else {
@@ -2714,6 +2721,9 @@ public class PreConditioningSchedulerService {
                 log.info("Event {} start time changed from {} to {} - cancelling task and forcing reschedule", 
                         event.getId(), oldTime, newTime);
                 
+                // Check if preconditioning was actually sent to vehicle before notifying
+                boolean wasActive = entityToProcess.getStatus() == PreconditioningStatus.ACTIVE;
+                
                 // Cancel existing scheduled task since timing has changed
                 cancelExistingTasks(event.getId());
                 
@@ -2721,11 +2731,13 @@ public class PreConditioningSchedulerService {
                 entityToProcess.setUnixStartTime(event.getStart().getDateTime().getValue());
                 entityToProcess.setStatus(PreconditioningStatus.PENDING); // Reset for re-evaluation
                 
-                // Send SMS notification about time change
-                String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
-                java.text.SimpleDateFormat timeFormat = new java.text.SimpleDateFormat("h:mm a");
-                sendSmsNotification(String.format("Event '%s' time changed from %s to %s - preconditioning will be rescheduled",
-                        eventName, timeFormat.format(oldTime), timeFormat.format(newTime)));
+                // Only send SMS notification if preconditioning was already sent to vehicle
+                if (wasActive) {
+                    String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
+                    java.text.SimpleDateFormat timeFormat = new java.text.SimpleDateFormat("h:mm a");
+                    sendSmsNotification(String.format("Event '%s' time changed from %s to %s - preconditioning will be rescheduled",
+                            eventName, timeFormat.format(oldTime), timeFormat.format(newTime)));
+                }
             }
             
             // Update event summary if it has changed
@@ -2763,16 +2775,21 @@ public class PreConditioningSchedulerService {
             log.warn("Event {} assignee changed from VIN {} ({}) to VIN {} ({}) - cancelling old task and forcing reschedule",
                     event.getId(), oldVin, getVehicleDisplayName(oldVin), newVin, getVehicleDisplayName(newVin));
             
+            // Check if preconditioning was actually sent to vehicle before notifying
+            boolean wasActive = entityToProcess.getStatus() == PreconditioningStatus.ACTIVE;
+            
             // Cancel existing scheduled task
             cancelExistingTasks(event.getId());
             
             // Reset status to PENDING to force re-evaluation and rescheduling
             entityToProcess.setStatus(PreconditioningStatus.PENDING);
             
-            // Send SMS notification about the change
-            String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
-            sendSmsNotification(String.format("Event assignee changed: '%s' reassigned from %s to %s", 
-                    eventName, getVehicleDisplayName(oldVin), getVehicleDisplayName(newVin)));
+            // Only send SMS notification if preconditioning was already sent to vehicle
+            if (wasActive) {
+                String eventName = event.getSummary() != null ? event.getSummary() : "Unknown Event";
+                sendSmsNotification(String.format("Event assignee changed: '%s' reassigned from %s to %s", 
+                        eventName, getVehicleDisplayName(oldVin), getVehicleDisplayName(newVin)));
+            }
         }
         
         // Update entity
@@ -3378,18 +3395,32 @@ public class PreConditioningSchedulerService {
         
         // Cancel scheduled tasks and mark entities as deleted
         entitiesToDelete.forEach(entity -> {
+            // Check status BEFORE we change it
+            boolean wasActive = entity.getStatus() == PreconditioningStatus.ACTIVE;
+            
             cancelExistingTasks(entity.getCalendarId());
             entity.setStatus(PreconditioningStatus.EXPIRED);
             entity.setDeleted(true);
             
-            // Send SMS notification about deleted event
-            String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
-            String vin = entity.getVin();
-            boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
-            String eventType = isReturnHome ? "Return home preconditioning" : "Preconditioning";
-            
-            sendSmsNotification(String.format("%s cancelled for %s - calendar event '%s' was deleted",
-                    eventType, getVehicleDisplayName(vin), eventName));
+            // Only send SMS notification if preconditioning was actually sent to vehicle (ACTIVE status)
+            // AND if the event hasn't just started (within last hour) - in that case it ended naturally
+            if (wasActive) {
+                long now = System.currentTimeMillis();
+                long timeSinceEventStart = now - entity.getUnixStartTime();
+                long oneHourInMillis = 60 * 60 * 1000;
+                
+                // Only notify if event hasn't started yet OR started more than 1 hour ago
+                // (events that just started are ending naturally, not being "cancelled")
+                if (entity.getUnixStartTime() > now || timeSinceEventStart > oneHourInMillis) {
+                    String eventName = entity.getEventSummary() != null ? entity.getEventSummary() : "Unknown Event";
+                    String vin = entity.getVin();
+                    boolean isReturnHome = entity.getCalendarId().contains("_RETURN_HOME");
+                    String eventType = isReturnHome ? "Return home preconditioning" : "Preconditioning";
+                    
+                    sendSmsNotification(String.format("%s cancelled for %s - calendar event '%s' was deleted",
+                            eventType, getVehicleDisplayName(vin), eventName));
+                }
+            }
         });
         calendarPreConditionLinkRepository.saveAll(entitiesToDelete);
         
