@@ -80,13 +80,13 @@ public class FleetApiService {
     }
 
     public VehicleData getVehicleData(String vin) {
-        return getVehicleDataWithEndpoints(vin, "preconditioning_schedule_data;drive_state;location_data", true);
+        return getVehicleDataWithEndpoints(vin, "preconditioning_schedule_data;drive_state;location_data;vehicle_state", true);
     }
 
     public VehicleData getVehicleDataNoCache(String vin) throws InterruptedException {
         forceVehicleDataRefresh(vin);
         Thread.sleep(10000);
-        return getVehicleDataWithEndpoints(vin, "preconditioning_schedule_data;drive_state;location_data", false);
+        return getVehicleDataWithEndpoints(vin, "preconditioning_schedule_data;drive_state;location_data;vehicle_state", false);
     }
 
     public void forceVehicleDataRefresh(String vin) {

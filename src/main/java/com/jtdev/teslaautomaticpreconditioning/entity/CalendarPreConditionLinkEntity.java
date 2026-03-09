@@ -52,4 +52,7 @@ public class CalendarPreConditionLinkEntity {
     
     @Column
     private String eventSummary; // Name/title of the calendar event
+    
+    @Column
+    private Boolean wasVehicleAway; // For return home: tracks if vehicle was ever away from home
 }

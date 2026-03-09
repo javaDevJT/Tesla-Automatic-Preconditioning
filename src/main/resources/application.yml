@@ -37,7 +37,7 @@ tesla:
     lon: YOUR_HOME_LON
   preconditioning:
     buffer:
-      minutes: 10
+      minutes: 15
     scheduling:
       out-of-metro-threshold-miles: 100
       rescheduling:

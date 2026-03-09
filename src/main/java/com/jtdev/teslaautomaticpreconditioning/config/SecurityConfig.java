@@ -31,7 +31,7 @@ public class SecurityConfig {
         log.debug("Using secret key: {}", secretKey);
         return http
                 .authorizeExchange(exchange -> exchange
-                        .pathMatchers("/actuator/health", "/actuator/info").permitAll()
+                        .pathMatchers("/actuator/health", "/actuator/info", "/flex").permitAll()
                         .anyExchange().authenticated())
                 .authenticationManager(bearerTokenAuthenticationManager())
                 .addFilterAt(bearerTokenAuthenticationFilter(), SecurityWebFiltersOrder.AUTHENTICATION)

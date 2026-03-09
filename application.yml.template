@@ -1,0 +1,93 @@
+# Tesla Automatic Preconditioning - Configuration Template
+# Copy this file to src/main/resources/application.yml and fill in your values
+
+google:
+  calendar:
+    # Path to your Google service account JSON file
+    # Get one by creating a service account with access to Calendar API in Google Cloud Console
+    # IMPORTANT: Never commit the actual JSON file to version control!
+    credentials-path: file:/path/to/your/service-account.json
+    application-name: Tesla Automatic Preconditioning
+    # Your Google Calendar email (can be a group calendar)
+    name: REPLACE_WITH_YOURS@group.calendar.google.com
+  maps:
+    routes:
+      # Field mask for Google Routes API to minimize response size
+      field-mask: routes.distanceMeters,routes.duration,routes.routeLabels,routes.routeToken
+  weather:
+    # Get your API key from https://developers.google.com/maps/documentation/weather
+    # Lots of free usage included
+    api-key: YOUR_GOOGLE_WEATHER_API_KEY
+    base-url: https://weather.googleapis.com/v1
+    units: IMPERIAL  # or METRIC
+
+teslemetry:
+  oauth:
+    # Get your token from https://teslemetry.com/
+    token: YOUR_TESLEMETRY_TOKEN
+
+spring:
+  mail:
+    # SMTP configuration for email notifications (used for SMS via email-to-SMS gateways)
+    host: smtp.gmail.com
+    port: 587
+    # Your email credentials
+    # IMPORTANT: Consider using environment variables instead of hardcoding
+    username: YOUR_EMAIL_USERNAME
+    password: YOUR_EMAIL_PASSWORD
+    properties:
+      mail.smtp.auth: true
+      mail.smtp.starttls.enable: true
+  datasource:
+    # Database configuration (default uses H2 in-memory for development)
+    # For production, use PostgreSQL or another persistent database
+    url: jdbc:h2:mem:testdb
+    username: sa
+    password: password
+  liquibase:
+    enabled: true
+    change-log: file:/resources/db/changelog/17-01-changelog.yaml
+
+tesla:
+  vin:
+    # Comma-separated list of email:VIN pairs
+    # Example: user1@example.com:VIN123456,user2@example.com:VIN789012
+    csv: ASSIGNEE_EMAIL_ONE:TESLA_VIN_ONE,ASSIGNEE_EMAIL_TWO:TESLA_VIN_TWO
+  home:
+    # Your home coordinates (used as default start location for route calculations)
+    lat: YOUR_HOME_LAT  # Example: 37.7749
+    lon: YOUR_HOME_LON  # Example: -122.4194
+  preconditioning:
+    buffer:
+      # Minutes of buffer before calculated departure time to start preconditioning
+      minutes: 10
+    scheduling:
+      # Distance threshold (miles) to consider vehicle "out of metro area"
+      out-of-metro-threshold-miles: 100
+      rescheduling:
+        # Enable automatic rescheduling based on vehicle location changes
+        enabled: true
+        # Minimum distance moved (miles) to trigger rescheduling
+        movement-threshold-miles: 25
+        # Minimum time savings (minutes) to justify rescheduling
+        time-savings-threshold-minutes: 30
+        # Minimum hours remaining before event to allow rescheduling
+        minimum-time-remaining-hours: 2
+
+app:
+  api:
+    # Secret key for securing API endpoints
+    # IMPORTANT: Use a strong, unique value in production
+    secret-key: TO_SECURE_ENDPOINTS
+  notifications:
+    sms:
+      # SMS gateway email addresses for notifications
+      # Format: phonenumber@carrier-sms-gateway.com
+      # Common gateways:
+      #   - Google Fi: @msg.fi.google.com
+      #   - AT&T: @txt.att.net
+      #   - T-Mobile: @tmomail.net
+      #   - Verizon: @vtext.com
+      # Multiple recipients separated by commas
+      # Example: 1234567890@msg.fi.google.com,9876543210@txt.att.net
+      recipients: YOUR_PHONE_1@msg.fi.google.com,YOUR_PHONE_2@msg.fi.google.com
