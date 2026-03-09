@@ -47,7 +47,7 @@ java -jar target/Tesla-Automatic-Preconditioning-0.0.39.jar
 This application requires sensitive credentials. **NEVER commit these to version control!**
 
 #### Protected Files (Already in .gitignore)
-- `src/main/resources/google/*.json` - Google service account credentials
+- `src/main/resources/google/*.json` - Google service account credentials (you should consider mounting these as a separate dir in a deployment)
 - `src/main/resources/application.yml` - Your actual configuration with secrets
 - `.env` files - Environment-specific configurations
 - `*.pem`, `*.key`, `*.p12` - Any private keys or certificates
