@@ -55,6 +55,8 @@ jobs:
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
+          cache-from: type=gha,version=2,scope=truenas-12900585dbca70e2
+          cache-to: type=gha,version=2,mode=max,scope=truenas-12900585dbca70e2
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
