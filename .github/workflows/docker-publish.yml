@@ -7,13 +7,16 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: truenas-tesla-automatic-preconditioning
+    runs-on: truenas-tesla-automatic-preconditioning-storage-32g
     env:
       BUILDKIT_HOST: tcp://buildkit:1234
       BUILDKIT_TLS_CA_CERT: /run/buildkit/tls/ca.pem
       BUILDKIT_TLS_CLIENT_CERT: /run/buildkit/tls/client.pem
       BUILDKIT_TLS_CLIENT_KEY: /run/buildkit/tls/client.key
     steps:
+      - name: Prepare disk dependency cache
+        id: ci_disk_cache_downloads
+        run: ci-cache downloads
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -22,8 +25,6 @@ jobs:
         with:
           java-version: '21'
           distribution: 'temurin'
-          cache: maven
-
       - name: Build with Maven
         run: ./mvnw -B package -DskipTests
 
@@ -52,11 +53,16 @@ jobs:
             cacert=/run/buildkit/tls/ca.pem
             cert=/run/buildkit/tls/client.pem
             key=/run/buildkit/tls/client.key
+      - name: Prepare disk build cache
+        id: ci_disk_cache_1
+        run: ci-cache "truenas-12900585dbca70e2"
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
-          cache-from: type=gha,version=2,scope=truenas-12900585dbca70e2
-          cache-to: type=gha,version=2,mode=max,scope=truenas-12900585dbca70e2
+          cache-from: |
+            type=local,src=${{ steps.ci_disk_cache_1.outputs.from }}
+            type=gha,version=2,scope=truenas-12900585dbca70e2
+          cache-to: ${{ steps.ci_disk_cache_1.outputs.to && format('type=local,dest={0},mode=max,ignore-error=true', steps.ci_disk_cache_1.outputs.to) || '' }}
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
