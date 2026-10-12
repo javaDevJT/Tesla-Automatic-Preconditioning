@@ -8,6 +8,8 @@ on:
     branches:
       - main
 
+env:
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
 jobs:
   build-and-push:
     runs-on: truenas-tesla-automatic-preconditioning-storage-32g
