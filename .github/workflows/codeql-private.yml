@@ -1,0 +1,121 @@
+name: CodeQL (private runner)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: '22 0 * * 1'
+      timezone: America/Detroit
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: CodeQL / ${{ matrix.language }}
+    runs-on: truenas-tesla-automatic-preconditioning-storage-16g
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      security-events: write
+    env:
+      CODEQL_OVERLAY_DATABASE_MODE: none
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: actions
+            build-mode: none
+          - language: java-kotlin
+            build-mode: none
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python for compact report retention
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          dependency-caching: false
+          trap-caching: false
+
+      - name: Analyze and submit CodeQL alerts
+        id: analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: /language:${{ matrix.language }}
+          output: ${{ runner.temp }}/codeql-sarif
+          upload: always
+          upload-database: false
+          wait-for-processing: true
+
+      - name: Create compact High/Critical retention report
+        id: minimize
+        if: ${{ always() && steps.analyze.outputs.sarif-output != '' }}
+        shell: bash
+        env:
+          CODEQL_SARIF_DIR: ${{ steps.analyze.outputs.sarif-output }}
+          REPORT: ${{ runner.temp }}/codeql-high-critical.json
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/minimize-security-reports.py \
+            --input "$CODEQL_SARIF_DIR/*.sarif" \
+            --output "$REPORT" \
+            --repository "$GITHUB_REPOSITORY" \
+            --revision "$GITHUB_SHA"
+          python3 - "$REPORT" >> "$GITHUB_OUTPUT" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as report_file:
+              report = json.load(report_file)
+          findings = report.get("findings")
+          if not isinstance(findings, list):
+              raise SystemExit("minimized CodeQL report has no findings array")
+          print("has_findings=" + ("true" if findings else "false"))
+          PY
+
+      - name: Retain compact High/Critical findings for one day
+        if: ${{ always() && steps.minimize.outputs.has_findings == 'true' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: security-high-critical-codeql-${{ github.run_id }}-${{ github.run_attempt }}-${{ matrix.language }}
+          path: ${{ runner.temp }}/codeql-high-critical.json
+          if-no-files-found: error
+          retention-days: 1
+
+  cleanup-artifacts:
+    name: Remove transient build artifacts
+    needs: ["analyze"]
+    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    runs-on: truenas-tesla-automatic-preconditioning-storage-8g
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out trusted default branch cleanup code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - name: Set up Python for bounded cleanup
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.13'
+      - name: Delete non-retained current-run artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/cleanup-actions-artifacts.py --current
+

@@ -5,6 +5,7 @@ on:
     # Replace this with the complete, explicit list of upstream workflow display names.
     # Never include "CI artifact janitor" in the list.
     workflows:
+      - "CodeQL (private runner)"
       - "Build and Publish Docker Image"
     types: [completed]
 

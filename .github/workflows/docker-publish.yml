@@ -130,7 +130,7 @@ jobs:
   cleanup-artifacts:
     name: Remove transient build artifacts
     needs: ["build-and-push"]
-    if: ${{ always() && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+    if: ${{ always() && ((github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.event.pull_request.head.repo.full_name == github.repository) }}
     runs-on: truenas-tesla-automatic-preconditioning-storage-8g
     timeout-minutes: 10
     permissions:
